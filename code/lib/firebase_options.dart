@@ -63,6 +63,8 @@ class DefaultFirebaseOptions {
     messagingSenderId: '444657505753',
     projectId: 'login-register-csdl',
     storageBucket: 'login-register-csdl.firebasestorage.app',
+    androidClientId: '444657505753-g5a27vudba2bk763qnlbmsrgfq0jigda.apps.googleusercontent.com',
+    iosClientId: '444657505753-birl221t31d663ahemtarsobu95dths1.apps.googleusercontent.com',
     iosBundleId: 'com.example.firebaseTest',
   );
 
@@ -72,6 +74,8 @@ class DefaultFirebaseOptions {
     messagingSenderId: '444657505753',
     projectId: 'login-register-csdl',
     storageBucket: 'login-register-csdl.firebasestorage.app',
+    androidClientId: '444657505753-g5a27vudba2bk763qnlbmsrgfq0jigda.apps.googleusercontent.com',
+    iosClientId: '444657505753-birl221t31d663ahemtarsobu95dths1.apps.googleusercontent.com',
     iosBundleId: 'com.example.firebaseTest',
   );
 
@@ -83,4 +87,5 @@ class DefaultFirebaseOptions {
     authDomain: 'login-register-csdl.firebaseapp.com',
     storageBucket: 'login-register-csdl.firebasestorage.app',
   );
+
 }
