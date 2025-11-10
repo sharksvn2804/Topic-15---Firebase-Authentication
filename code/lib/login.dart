@@ -1,8 +1,11 @@
 import 'package:flutter/material.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
+import 'package:google_sign_in/google_sign_in.dart';
+import 'package:flutter_facebook_auth/flutter_facebook_auth.dart';
 import 'package:firebase_test/profile.dart';
 import 'package:firebase_test/register.dart';
+import 'package:flutter/foundation.dart' show kIsWeb;
 
 class LoginPage extends StatefulWidget {
   const LoginPage({Key? key}) : super(key: key);
@@ -15,7 +18,7 @@ class _LoginPageState extends State<LoginPage> {
   final emailController = TextEditingController();
   final passwordController = TextEditingController();
   bool _isLoading = false;
-  
+
   // Login attempt monitoring
   int _failedAttempts = 0;
   DateTime? _lockoutUntil;
@@ -42,13 +45,12 @@ class _LoginPageState extends State<LoginPage> {
       if (doc.exists) {
         final data = doc.data()!;
         final lockoutTimestamp = data['lockoutUntil'] as Timestamp?;
-        
+
         setState(() {
           _failedAttempts = data['failedAttempts'] ?? 0;
           if (lockoutTimestamp != null) {
             _lockoutUntil = lockoutTimestamp.toDate();
-            
-            // Nếu đã hết thời gian khóa, reset
+
             if (_lockoutUntil!.isBefore(DateTime.now())) {
               _failedAttempts = 0;
               _lockoutUntil = null;
@@ -61,28 +63,25 @@ class _LoginPageState extends State<LoginPage> {
     }
   }
 
-  // Kiểm tra xem tài khoản có đang bị khóa không
   bool _isLockedOut() {
     if (_lockoutUntil == null) return false;
     return DateTime.now().isBefore(_lockoutUntil!);
   }
 
-  // Tính thời gian còn lại của khóa
   String _getRemainingLockoutTime() {
     if (_lockoutUntil == null) return '';
-    
+
     final remaining = _lockoutUntil!.difference(DateTime.now());
     if (remaining.isNegative) return '';
-    
+
     final minutes = remaining.inMinutes;
     final seconds = remaining.inSeconds % 60;
     return '$minutes phút $seconds giây';
   }
 
-  // Ghi log đăng nhập thất bại
   Future<void> _recordFailedAttempt(String email) async {
     _failedAttempts++;
-    
+
     DateTime? lockoutTime;
     if (_failedAttempts >= MAX_ATTEMPTS) {
       lockoutTime = DateTime.now().add(LOCKOUT_DURATION);
@@ -92,7 +91,6 @@ class _LoginPageState extends State<LoginPage> {
     }
 
     try {
-      // Lưu vào Firestore
       await FirebaseFirestore.instance
           .collection('login_attempts')
           .doc(email)
@@ -103,7 +101,6 @@ class _LoginPageState extends State<LoginPage> {
         'lockoutUntil': lockoutTime != null ? Timestamp.fromDate(lockoutTime) : null,
       }, SetOptions(merge: true));
 
-      // Ghi log vào collection riêng để phân tích
       await FirebaseFirestore.instance
           .collection('security_logs')
           .add({
@@ -111,10 +108,9 @@ class _LoginPageState extends State<LoginPage> {
         'email': email,
         'timestamp': FieldValue.serverTimestamp(),
         'failedAttempts': _failedAttempts,
-        'ipAddress': 'N/A', // Có thể thêm IP nếu có
+        'ipAddress': 'N/A',
       });
 
-      // Nếu đạt ngưỡng, gửi cảnh báo (có thể tích hợp email ở đây)
       if (_failedAttempts >= MAX_ATTEMPTS) {
         await _sendSecurityAlert(email);
       }
@@ -123,10 +119,8 @@ class _LoginPageState extends State<LoginPage> {
     }
   }
 
-  // Gửi cảnh báo bảo mật
   Future<void> _sendSecurityAlert(String email) async {
     try {
-      // Lưu cảnh báo vào Firestore để admin có thể xem
       await FirebaseFirestore.instance
           .collection('security_alerts')
           .add({
@@ -138,29 +132,24 @@ class _LoginPageState extends State<LoginPage> {
         'status': 'unread',
       });
 
-      // TODO: Tích hợp Firebase Functions để gửi email thực tế
-      // Ví dụ: await sendEmailAlert(email, _failedAttempts);
-      
       print('Security alert sent for: $email');
     } catch (e) {
       print('Error sending security alert: $e');
     }
   }
 
-  // Reset số lần đăng nhập sai sau khi đăng nhập thành công
   Future<void> _resetLoginAttempts(String email) async {
     try {
       await FirebaseFirestore.instance
           .collection('login_attempts')
           .doc(email)
           .delete();
-      
+
       setState(() {
         _failedAttempts = 0;
         _lockoutUntil = null;
       });
 
-      // Ghi log đăng nhập thành công
       await FirebaseFirestore.instance
           .collection('security_logs')
           .add({
@@ -173,27 +162,59 @@ class _LoginPageState extends State<LoginPage> {
     }
   }
 
-  Future<void> handleUserProfile(User user) async {
+  // Xử lý profile user cho cả email và social login
+  Future<void> handleUserProfile(User user, {String? loginMethod}) async {
     final usersRef = FirebaseFirestore.instance.collection('users').doc(user.uid);
     final doc = await usersRef.get();
 
     if (!doc.exists) {
+      // Tạo mới user
       await usersRef.set({
         'name': user.displayName ?? '',
         'email': user.email,
         'photoUrl': user.photoURL,
         'phone': '',
+        'gender': 'Khác',
+        'role': 'user',
+        'loginMethod': loginMethod ?? 'email',
         'createdAt': FieldValue.serverTimestamp(),
         'lastLogin': FieldValue.serverTimestamp(),
+        'deleted': false,
       });
     } else {
-      await usersRef.update({'lastLogin': FieldValue.serverTimestamp()});
+      // Cập nhật thông tin nếu user đã tồn tại
+      final data = doc.data()!;
+
+      // Kiểm tra xem tài khoản có bị xóa không
+      if (data['deleted'] == true) {
+        throw Exception('account_deleted');
+      }
+
+      // Cập nhật lastLogin và thông tin mới từ social (nếu có)
+      Map<String, dynamic> updateData = {
+        'lastLogin': FieldValue.serverTimestamp(),
+      };
+
+      // Cập nhật loginMethod nếu đăng nhập bằng social
+      if (loginMethod != null && loginMethod != 'email') {
+        updateData['loginMethod'] = loginMethod;
+      }
+
+      // Cập nhật photo và name nếu social login có thông tin mới
+      if (user.photoURL != null && user.photoURL!.isNotEmpty) {
+        updateData['photoUrl'] = user.photoURL;
+      }
+      if (user.displayName != null && user.displayName!.isNotEmpty) {
+        updateData['name'] = user.displayName;
+      }
+
+      await usersRef.update(updateData);
     }
   }
 
   Future<void> forgotPassword() async {
     final email = emailController.text.trim();
-    
+
     if (email.isEmpty) {
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(content: Text('Vui lòng nhập email để đặt lại mật khẩu')),
@@ -208,7 +229,6 @@ class _LoginPageState extends State<LoginPage> {
       return;
     }
 
-    // Hiển thị dialog xác nhận
     final confirm = await showDialog<bool>(
       context: context,
       builder: (context) => AlertDialog(
@@ -245,12 +265,11 @@ class _LoginPageState extends State<LoginPage> {
 
     try {
       await FirebaseAuth.instance.sendPasswordResetEmail(email: email);
-      
+
       if (!mounted) return;
-      
+
       setState(() => _isLoading = false);
-      
-      // Hiển thị dialog thành công
+
       showDialog(
         context: context,
         builder: (context) => AlertDialog(
@@ -263,7 +282,7 @@ class _LoginPageState extends State<LoginPage> {
           ),
           content: Text(
             'Email đặt lại mật khẩu đã được gửi đến $email.\n\n'
-            'Vui lòng kiểm tra hộp thư (kể cả thư rác) và làm theo hướng dẫn để đặt lại mật khẩu.',
+                'Vui lòng kiểm tra hộp thư (kể cả thư rác) và làm theo hướng dẫn để đặt lại mật khẩu.',
           ),
           actions: [
             TextButton(
@@ -273,12 +292,12 @@ class _LoginPageState extends State<LoginPage> {
           ],
         ),
       );
-      
+
     } on FirebaseAuthException catch (e) {
       setState(() => _isLoading = false);
-      
+
       String errorMsg = 'Lỗi gửi email';
-      
+
       switch (e.code) {
         case 'user-not-found':
           errorMsg = 'Email này chưa được đăng ký';
@@ -289,7 +308,7 @@ class _LoginPageState extends State<LoginPage> {
         default:
           errorMsg = e.message ?? 'Lỗi gửi email đặt lại mật khẩu';
       }
-      
+
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(content: Text(errorMsg)),
       );
@@ -301,11 +320,11 @@ class _LoginPageState extends State<LoginPage> {
     }
   }
 
+  // Đăng nhập bằng email/password
   Future<void> login() async {
     final email = emailController.text.trim();
     final password = passwordController.text.trim();
 
-    // Validation
     if (email.isEmpty || password.isEmpty) {
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(content: Text('Vui lòng nhập email và mật khẩu')),
@@ -313,13 +332,12 @@ class _LoginPageState extends State<LoginPage> {
       return;
     }
 
-    // Kiểm tra lockout
     if (_isLockedOut()) {
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(
           content: Text(
             'Tài khoản tạm thời bị khóa do đăng nhập sai quá nhiều lần.\n'
-            'Vui lòng thử lại sau: ${_getRemainingLockoutTime()}',
+                'Vui lòng thử lại sau: ${_getRemainingLockoutTime()}',
           ),
           backgroundColor: Colors.red,
           duration: Duration(seconds: 5),
@@ -337,43 +355,37 @@ class _LoginPageState extends State<LoginPage> {
       );
 
       final user = credential.user!;
-      
-      // Reset login attempts sau khi đăng nhập thành công
+
       await _resetLoginAttempts(email);
-      
-      // Tối ưu tốc độ bằng Future.wait
+
       await Future.wait([
-        handleUserProfile(user),
+        handleUserProfile(user, loginMethod: 'email'),
         Future.delayed(Duration(milliseconds: 400)),
       ]);
 
       if (!mounted) return;
-      
-      // Navigator sẽ tự động chuyển trang vì StreamBuilder trong main.dart
-      // nhưng để đảm bảo, ta vẫn có thể dùng:
+
       Navigator.pushReplacement(
         context,
         MaterialPageRoute(builder: (_) => ProfilePage(user: user)),
       );
     } on FirebaseAuthException catch (e) {
       String errorMsg = 'Đăng nhập thất bại';
-      
+
       switch (e.code) {
         case 'user-not-found':
           errorMsg = 'Email chưa được đăng ký';
           break;
         case 'wrong-password':
           errorMsg = 'Mật khẩu không đúng';
-          // Ghi log đăng nhập thất bại
           await _recordFailedAttempt(email);
-          
-          // Hiển thị cảnh báo nếu gần đạt ngưỡng
+
           if (_failedAttempts >= MAX_ATTEMPTS - 1 && _failedAttempts < MAX_ATTEMPTS) {
             errorMsg += '\n\nCảnh báo: Bạn còn ${MAX_ATTEMPTS - _failedAttempts} lần thử. '
-                       'Sau đó tài khoản sẽ bị khóa ${LOCKOUT_DURATION.inMinutes} phút.';
+                'Sau đó tài khoản sẽ bị khóa ${LOCKOUT_DURATION.inMinutes} phút.';
           } else if (_failedAttempts >= MAX_ATTEMPTS) {
             errorMsg = 'Đã đăng nhập sai $MAX_ATTEMPTS lần!\n'
-                      'Tài khoản bị khóa trong ${LOCKOUT_DURATION.inMinutes} phút.';
+                'Tài khoản bị khóa trong ${LOCKOUT_DURATION.inMinutes} phút.';
           }
           break;
         case 'invalid-email':
@@ -385,7 +397,7 @@ class _LoginPageState extends State<LoginPage> {
         default:
           errorMsg = e.message ?? 'Đăng nhập thất bại';
       }
-      
+
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(
           content: Text(errorMsg),
@@ -404,10 +416,177 @@ class _LoginPageState extends State<LoginPage> {
     }
   }
 
+// Đăng nhập bằng Google - FIXED
+  Future<void> signInWithGoogle() async {
+    setState(() => _isLoading = true);
+
+    try {
+      // Sử dụng clientId khác nhau tùy theo platform
+      final GoogleSignIn googleSignIn = GoogleSignIn(
+        scopes: ['email'],
+        // Đối với Web: sử dụng Web Client ID
+        // Đối với Android/iOS: không cần clientId (lấy từ config)
+        clientId: kIsWeb
+            ? '444657505753-cbb4580e7bb816feff35c8.apps.googleusercontent.com' // Web Client ID từ firebase_options.dart
+            : null,
+      );
+
+      final GoogleSignInAccount? account = await googleSignIn.signIn();
+
+      if (account == null) {
+        setState(() => _isLoading = false);
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Đăng nhập Google bị hủy')),
+        );
+        return;
+      }
+
+      final GoogleSignInAuthentication auth = await account.authentication;
+
+      final credential = GoogleAuthProvider.credential(
+        idToken: auth.idToken,
+        accessToken: auth.accessToken,
+      );
+
+      final userCredential = await FirebaseAuth.instance.signInWithCredential(credential);
+      final user = userCredential.user!;
+
+      // Xử lý profile
+      try {
+        await handleUserProfile(user, loginMethod: 'google');
+      } catch (e) {
+        if (e.toString().contains('account_deleted')) {
+          await FirebaseAuth.instance.signOut();
+          await googleSignIn.signOut();
+
+          if (mounted) {
+            setState(() => _isLoading = false);
+            ScaffoldMessenger.of(context).showSnackBar(
+              SnackBar(
+                content: Text('Tài khoản đã bị vô hiệu hóa bởi quản trị viên'),
+                backgroundColor: Colors.red,
+              ),
+            );
+          }
+          return;
+        }
+        rethrow;
+      }
+
+      // Ghi log đăng nhập thành công
+      await FirebaseFirestore.instance
+          .collection('security_logs')
+          .add({
+        'event': 'login_success_google',
+        'email': user.email,
+        'userId': user.uid,
+        'timestamp': FieldValue.serverTimestamp(),
+      });
+
+      if (!mounted) return;
+
+      setState(() => _isLoading = false);
+
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text('Đăng nhập Google thành công!'),
+          backgroundColor: Colors.green,
+        ),
+      );
+
+      Navigator.pushReplacement(
+        context,
+        MaterialPageRoute(builder: (_) => ProfilePage(user: user)),
+      );
+
+    } catch (e) {
+      setState(() => _isLoading = false);
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Lỗi đăng nhập Google: $e')),
+      );
+    }
+  }
+
+  // Đăng nhập bằng Facebook
+  Future<void> signInWithFacebook() async {
+    setState(() => _isLoading = true);
+
+    try {
+      final result = await FacebookAuth.instance.login();
+      final accessToken = result.accessToken?.tokenString;
+
+      if (accessToken == null) {
+        setState(() => _isLoading = false);
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Đăng nhập Facebook bị hủy hoặc lỗi token')),
+        );
+        return;
+      }
+
+      final credential = FacebookAuthProvider.credential(accessToken);
+      final userCredential = await FirebaseAuth.instance.signInWithCredential(credential);
+      final user = userCredential.user!;
+
+      // Xử lý profile
+      try {
+        await handleUserProfile(user, loginMethod: 'facebook');
+      } catch (e) {
+        if (e.toString().contains('account_deleted')) {
+          await FirebaseAuth.instance.signOut();
+          await FacebookAuth.instance.logOut();
+
+          if (mounted) {
+            setState(() => _isLoading = false);
+            ScaffoldMessenger.of(context).showSnackBar(
+              SnackBar(
+                content: Text('Tài khoản đã bị vô hiệu hóa bởi quản trị viên'),
+                backgroundColor: Colors.red,
+              ),
+            );
+          }
+          return;
+        }
+        rethrow;
+      }
+
+      // Ghi log đăng nhập thành công
+      await FirebaseFirestore.instance
+          .collection('security_logs')
+          .add({
+        'event': 'login_success_facebook',
+        'email': user.email,
+        'userId': user.uid,
+        'timestamp': FieldValue.serverTimestamp(),
+      });
+
+      if (!mounted) return;
+
+      setState(() => _isLoading = false);
+
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text('Đăng nhập Facebook thành công!'),
+          backgroundColor: Colors.green,
+        ),
+      );
+
+      Navigator.pushReplacement(
+        context,
+        MaterialPageRoute(builder: (_) => ProfilePage(user: user)),
+      );
+
+    } catch (e) {
+      setState(() => _isLoading = false);
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Lỗi đăng nhập Facebook: $e')),
+      );
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
     final isLockedOut = _isLockedOut();
-    
+
     return Scaffold(
       appBar: AppBar(
         title: Text('Đăng nhập'),
@@ -430,7 +609,7 @@ class _LoginPageState extends State<LoginPage> {
                       color: Colors.indigo,
                     ),
                     SizedBox(height: 30),
-                    
+
                     // Cảnh báo khóa tài khoản
                     if (isLockedOut)
                       Container(
@@ -469,7 +648,7 @@ class _LoginPageState extends State<LoginPage> {
                           ],
                         ),
                       ),
-                    
+
                     // Cảnh báo số lần thử
                     if (_failedAttempts > 0 && !isLockedOut)
                       Container(
@@ -487,7 +666,7 @@ class _LoginPageState extends State<LoginPage> {
                             Expanded(
                               child: Text(
                                 'Đã đăng nhập sai $_failedAttempts/${MAX_ATTEMPTS} lần. '
-                                'Còn ${MAX_ATTEMPTS - _failedAttempts} lần thử.',
+                                    'Còn ${MAX_ATTEMPTS - _failedAttempts} lần thử.',
                                 style: TextStyle(
                                   fontSize: 12,
                                   color: Colors.orange[900],
@@ -497,7 +676,7 @@ class _LoginPageState extends State<LoginPage> {
                           ],
                         ),
                       ),
-                    
+
                     // Email field
                     TextField(
                       controller: emailController,
@@ -508,14 +687,13 @@ class _LoginPageState extends State<LoginPage> {
                         prefixIcon: Icon(Icons.email),
                       ),
                       onChanged: (value) {
-                        // Tải thông tin login attempts khi email thay đổi
                         if (value.contains('@')) {
                           _loadLoginAttempts();
                         }
                       },
                     ),
                     SizedBox(height: 16),
-                    
+
                     // Password field
                     TextField(
                       controller: passwordController,
@@ -527,7 +705,7 @@ class _LoginPageState extends State<LoginPage> {
                       ),
                     ),
                     SizedBox(height: 24),
-                    
+
                     // Login button
                     SizedBox(
                       width: double.infinity,
@@ -545,7 +723,7 @@ class _LoginPageState extends State<LoginPage> {
                       ),
                     ),
                     SizedBox(height: 16),
-                    
+
                     // Forgot password button
                     Align(
                       alignment: Alignment.centerRight,
@@ -561,7 +739,7 @@ class _LoginPageState extends State<LoginPage> {
                       ),
                     ),
                     SizedBox(height: 8),
-                    
+
                     // Register button
                     TextButton(
                       onPressed: _isLoading ? null : () {
@@ -578,12 +756,79 @@ class _LoginPageState extends State<LoginPage> {
                         ),
                       ),
                     ),
+
+                    SizedBox(height: 20),
+
+                    // Divider
+                    Row(
+                      children: [
+                        Expanded(child: Divider(thickness: 1)),
+                        Padding(
+                          padding: EdgeInsets.symmetric(horizontal: 16),
+                          child: Text(
+                            'HOẶC',
+                            style: TextStyle(
+                              color: Colors.grey[600],
+                              fontWeight: FontWeight.bold,
+                            ),
+                          ),
+                        ),
+                        Expanded(child: Divider(thickness: 1)),
+                      ],
+                    ),
+
+                    SizedBox(height: 20),
+
+                    // Social login buttons
+                    Row(
+                      children: [
+                        Expanded(
+                          child: ElevatedButton.icon(
+                            icon: Icon(Icons.login, color: Colors.red[700]),
+                            label: Text(
+                              'Google',
+                              style: TextStyle(
+                                fontSize: 14,
+                                color: Colors.red[700],
+                                fontWeight: FontWeight.bold,
+                              ),
+                            ),
+                            style: ElevatedButton.styleFrom(
+                              backgroundColor: Colors.red[50],
+                              padding: EdgeInsets.symmetric(vertical: 12),
+                              side: BorderSide(color: Colors.red[200]!),
+                            ),
+                            onPressed: _isLoading ? null : signInWithGoogle,
+                          ),
+                        ),
+                        SizedBox(width: 12),
+                        Expanded(
+                          child: ElevatedButton.icon(
+                            icon: Icon(Icons.facebook, color: Colors.blue[700]),
+                            label: Text(
+                              'Facebook',
+                              style: TextStyle(
+                                fontSize: 14,
+                                color: Colors.blue[700],
+                                fontWeight: FontWeight.bold,
+                              ),
+                            ),
+                            style: ElevatedButton.styleFrom(
+                              backgroundColor: Colors.blue[50],
+                              padding: EdgeInsets.symmetric(vertical: 12),
+                              side: BorderSide(color: Colors.blue[200]!),
+                            ),
+                            onPressed: _isLoading ? null : signInWithFacebook,
+                          ),
+                        ),
+                      ],
+                    ),
                   ],
                 ),
               ),
             ),
           ),
-          
+
           // Loading overlay
           if (_isLoading)
             Container(
