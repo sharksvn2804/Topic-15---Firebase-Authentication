@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">Firebase Test</string>
+    <string name="facebook_app_id">1536080054376344</string>
+    <string name="fb_login_protocol_scheme">fb1536080054376344</string>
+    <string name="facebook_client_token">508a39ac0656ef3739b60b2963a14afd</string>
+</resources>
